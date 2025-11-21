@@ -1,0 +1,5 @@
+{
+  "name": "Web Serial Studio",
+  "description": "A modern, feature-rich browser-based serial port monitor and transmitter built with React and Web Serial API.",
+  "requestFramePermissions": []
+}
