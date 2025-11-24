@@ -47,33 +47,34 @@ export const TerminalView = forwardRef<TerminalRef, TerminalViewProps>(({ onInpu
         background: '#000000',
         foreground: '#e5e7eb', // Gray-200
         cursor: '#ffffff',
+        selectionBackground: 'rgba(255, 255, 255, 0.3)',
       },
       convertEol: true, // Treat \n as \r\n for display
-      scrollback: 10000,
+      scrollback: 50000, // Increased buffer
       macOptionIsMeta: true, // Better Alt key handling on Mac
       allowProposedApi: true,
     });
 
     // --- Key Event Interception ---
-    // Allows xterm to capture keys that browsers normally grab (F1-F12, Ctrl+..., etc)
     term.attachCustomKeyEventHandler((event) => {
-      // Filter out copy/paste so user can still use them if they want (optional)
-      // But usually standard terminals handle Ctrl+C as break signal (0x03)
-      // If users want browser copy/paste, they usually use context menu or Ctrl+Shift+C/V in terminals
-      
       if (event.type === 'keydown') {
-        // Always allow F12 (DevTools) and F5 (Refresh) during development? 
-        // For a "Native Like" app, we usually block them, but let's allow F12 for debug.
-        if (event.code === 'F12') return true;
+        // Keys that should NOT perform default browser actions (like scrolling)
+        const preventDefaultKeys = [
+            'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+            'Home', 'End', 'PageUp', 'PageDown', 
+            'Tab'
+        ];
 
-        // Allow Copy (Ctrl+C) only if there is a text selection in the terminal?
-        // Standard xterm behavior: Ctrl+C sends \x03. To copy, users usually select text.
-        // We will allow xterm to consume everything else.
+        if (preventDefaultKeys.includes(event.code) || preventDefaultKeys.includes(event.key)) {
+            event.preventDefault();
+            return true; // Let xterm handle it
+        }
+
+        // Always allow F12 (DevTools)
+        if (event.code === 'F12') return true;
         
-        // Capture F1-F12, Arrow keys, Tab, Esc, etc.
-        // Capture Ctrl+Key combinations (except maybe Ctrl+R/F5 if you really want refresh)
-        
-        return true; // Returning true allows xterm to process the key. Returning false stops it.
+        // Ctrl+A/C/V etc.
+        // Returning true means xterm handles it.
       }
       return true;
     });
@@ -89,7 +90,11 @@ export const TerminalView = forwardRef<TerminalRef, TerminalViewProps>(({ onInpu
     }
 
     term.open(containerRef.current);
-    if (fitAddon) fitAddon.fit();
+    if (fitAddon) {
+      try {
+        fitAddon.fit();
+      } catch (e) { console.warn("Initial fit failed", e); }
+    }
 
     // Focus terminal on mount so keys work immediately
     term.focus();
@@ -104,7 +109,11 @@ export const TerminalView = forwardRef<TerminalRef, TerminalViewProps>(({ onInpu
 
     // Handle Window Resize
     const handleResize = () => {
-      if (fitAddon) fitAddon.fit();
+      if (fitAddon) {
+        try {
+           fitAddon.fit();
+        } catch (e) {}
+      }
     };
     window.addEventListener('resize', handleResize);
 
@@ -123,5 +132,11 @@ export const TerminalView = forwardRef<TerminalRef, TerminalViewProps>(({ onInpu
     };
   }, [onInput]);
 
-  return <div className="w-full h-full bg-black" ref={containerRef} />;
+  return (
+    <div 
+      className="w-full h-full bg-black outline-none" 
+      ref={containerRef} 
+      tabIndex={-1} // Helps with focus management
+    />
+  );
 });
