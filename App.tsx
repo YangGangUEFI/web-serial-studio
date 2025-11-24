@@ -397,7 +397,8 @@ const App: React.FC = () => {
     if (displayMode === DisplayMode.HEX) {
         // Binary Save (Raw bytes)
         for (const item of rxHistory.current) {
-            blobParts.push(item.data);
+            // Fix: cast to any to avoid strict typescript check failure for ArrayBufferLike vs ArrayBuffer
+            blobParts.push(item.data as any);
         }
         filename = `serial_dump_${new Date().toISOString().replace(/[:.]/g, '-')}.bin`;
         mimeType = 'application/octet-stream';

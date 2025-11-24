@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 
 interface TerminalViewProps {
@@ -80,7 +81,7 @@ export const TerminalView = forwardRef<TerminalRef, TerminalViewProps>(({ onInpu
     });
 
     // Instantiate FitAddon
-    let fitAddon;
+    let fitAddon: any;
     try {
       const FitAddonConstructor = (FitAddon as any).FitAddon || FitAddon;
       fitAddon = new FitAddonConstructor();
