@@ -4,7 +4,7 @@ import { ConfigPanel } from './components/ConfigPanel';
 import { Button } from './components/Button';
 import { TerminalView, TerminalRef } from './components/TerminalView';
 import { SerialPort, DisplayMode, SendMode, ParityType, FlowControlType } from './types';
-import { bufferToHex, hexStringToBuffer, downloadBlob, formatTimestamp } from './utils';
+import { bufferToHex, hexStringToBuffer, downloadBlob, formatTimestamp, concatUint8Arrays } from './utils';
 
 // Web Serial API Polyfill for TypeScript
 declare global {
@@ -66,6 +66,8 @@ const App: React.FC = () => {
 
   // --- Helpers ---
 
+  // NOTE: This function is ONLY used for "Formatted" modes (Hex or Text+Timestamp).
+  // Raw Text mode bypasses this to support full xterm control characters.
   const formatDataForDisplay = (item: HistoryItem, mode: DisplayMode, withTime: boolean, isNewLineStart: boolean): { text: string, endsWithNewline: boolean } => {
     const tsString = withTime ? `\x1b[32m${formatTimestamp(item.timestamp)}\x1b[0m ` : '';
     
@@ -74,32 +76,50 @@ const App: React.FC = () => {
       const hex = bufferToHex(item.data);
       return { 
         text: `${tsString}${hex} `, 
-        endsWithNewline: false // Hex view is continuous blocks usually, or we can force newlines. Let's keep it stream-like but separated by spaces.
+        endsWithNewline: false 
       };
     } else {
-      // Text mode: Handle newlines for timestamps
+      // Text mode WITH timestamp: We must decode and inject timestamps.
+      // This might break some complex ANSI sequences split across chunks, but it's the trade-off for per-line timestamps.
       let textStr = new TextDecoder().decode(item.data);
       
       if (withTime) {
-        // If we are at the start of a line, prepend timestamp
         let formatted = '';
         if (isNewLineStart) {
           formatted += tsString;
         }
         // Inject timestamp after every newline
-        // We use a regex to replace \n with \n[TIMESTAMP]
-        // Note: Serial often sends \r\n. We target \n.
         formatted += textStr.replace(/\n/g, `\n${tsString}`);
         
-        // Check if the *last* character of this chunk is a newline
-        // This determines if the *next* chunk should start with a timestamp
         const endsWithNL = textStr.endsWith('\n');
-        
         return { text: formatted, endsWithNewline: endsWithNL };
       }
       
       return { text: textStr, endsWithNewline: textStr.endsWith('\n') };
     }
+  };
+
+  const writeBatchToTerminal = (items: HistoryItem[], isRepaint = false) => {
+    if (!terminalRef.current || items.length === 0) return;
+
+    // FAST PATH: Raw Text Mode (No Timestamp)
+    // Directly pipe binary data to xterm for perfect emulation
+    if (displayMode === DisplayMode.TEXT && !showTimestamp) {
+        const rawBuffers = items.map(i => i.data);
+        const merged = concatUint8Arrays(rawBuffers);
+        terminalRef.current.write(merged);
+        if (isRepaint) lastCharWasNewline.current = true; // Reset heuristic
+        return;
+    }
+
+    // SLOW PATH: Formatted modes (Hex or Text+Timestamp)
+    let buffer = '';
+    for (const item of items) {
+       const res = formatDataForDisplay(item, displayMode, showTimestamp, lastCharWasNewline.current);
+       lastCharWasNewline.current = res.endsWithNewline;
+       buffer += res.text;
+    }
+    terminalRef.current.write(buffer);
   };
 
   const repaintTerminal = () => {
@@ -108,22 +128,11 @@ const App: React.FC = () => {
     terminalRef.current.reset(); // Fully clear xterm
     lastCharWasNewline.current = true; // Reset state
 
-    // Replay entire history
-    let buffer = '';
-    const CHUNK_LIMIT = 100000; // Flush every 100k chars
-
-    for (const item of rxHistory.current) {
-      const res = formatDataForDisplay(item, displayMode, showTimestamp, lastCharWasNewline.current);
-      lastCharWasNewline.current = res.endsWithNewline;
-      buffer += res.text;
-
-      if (buffer.length > CHUNK_LIMIT) {
-        terminalRef.current.write(buffer);
-        buffer = '';
-      }
-    }
-    if (buffer.length > 0) {
-      terminalRef.current.write(buffer);
+    // Process history in chunks to avoid blocking UI
+    const CHUNK_SIZE = 2000;
+    for (let i = 0; i < rxHistory.current.length; i += CHUNK_SIZE) {
+        const batch = rxHistory.current.slice(i, i + CHUNK_SIZE);
+        writeBatchToTerminal(batch, true);
     }
   };
 
@@ -135,23 +144,16 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayMode, showTimestamp]);
 
-  // Process incoming data loop
+  // Process incoming data loop (Update UI)
   useEffect(() => {
     const interval = setInterval(() => {
       if (pendingChunks.current.length === 0) return;
 
       const chunks = pendingChunks.current;
       pendingChunks.current = []; // Clear queue
+      
+      writeBatchToTerminal(chunks);
 
-      if (terminalRef.current) {
-        let buffer = '';
-        for (const item of chunks) {
-           const res = formatDataForDisplay(item, displayMode, showTimestamp, lastCharWasNewline.current);
-           lastCharWasNewline.current = res.endsWithNewline;
-           buffer += res.text;
-        }
-        terminalRef.current.write(buffer);
-      }
     }, 16); // 60 FPS
 
     return () => clearInterval(interval);
@@ -190,6 +192,7 @@ const App: React.FC = () => {
           break;
         }
         if (value) {
+          // Storage & Display
           const item: HistoryItem = {
             timestamp: Date.now(),
             data: value
@@ -403,7 +406,8 @@ const App: React.FC = () => {
         filename = `serial_dump_${new Date().toISOString().replace(/[:.]/g, '-')}.bin`;
         mimeType = 'application/octet-stream';
     } else {
-        // Text Log Save
+        // Text Log Save (Uses the formatted text logic)
+        // We use a clean state just for generating the log string
         let tempNewlineState = true;
         for (const item of rxHistory.current) {
             const res = formatDataForDisplay(item, displayMode, showTimestamp, tempNewlineState);
@@ -452,9 +456,9 @@ const App: React.FC = () => {
         
         <div className="flex-1 flex flex-col min-w-0 relative">
             {/* Toolbar */}
-            <div className="bg-gray-900 p-2 flex items-center gap-3 border-b border-gray-800 text-sm">
-                <span className="text-gray-400 font-bold px-2">Display:</span>
-                <div className="flex bg-gray-800 rounded p-1">
+            <div className="bg-gray-900 p-2 flex items-center gap-3 border-b border-gray-800 text-sm overflow-x-auto">
+                <span className="text-gray-400 font-bold px-2 whitespace-nowrap">Display:</span>
+                <div className="flex bg-gray-800 rounded p-1 whitespace-nowrap">
                     <button 
                         onClick={() => setDisplayMode(DisplayMode.TEXT)}
                         className={`px-3 py-1 rounded text-xs font-medium transition-all ${displayMode === DisplayMode.TEXT ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'}`}
@@ -471,7 +475,7 @@ const App: React.FC = () => {
 
                 <div className="w-px h-6 bg-gray-700 mx-2"></div>
 
-                <label className="flex items-center gap-2 cursor-pointer hover:text-white text-gray-300 select-none">
+                <label className="flex items-center gap-2 cursor-pointer hover:text-white text-gray-300 select-none whitespace-nowrap">
                   <input 
                     type="checkbox" 
                     checked={showTimestamp} 
@@ -487,10 +491,10 @@ const App: React.FC = () => {
                   rxHistory.current = [];
                   lastCharWasNewline.current = true;
                   terminalRef.current?.reset();
-                }} className="text-xs py-1 h-8">
+                }} className="text-xs py-1 h-8 whitespace-nowrap">
                     Clear Screen
                 </Button>
-                <Button variant="secondary" onClick={downloadLogs} className="text-xs py-1 h-8 flex items-center gap-1">
+                <Button variant="secondary" onClick={downloadLogs} className="text-xs py-1 h-8 flex items-center gap-1 whitespace-nowrap">
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                     Save
                 </Button>
