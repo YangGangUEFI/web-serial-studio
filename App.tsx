@@ -41,6 +41,7 @@ const App: React.FC = () => {
   // Input Mode
   const [bottomInputMode, setBottomInputMode] = useState<SendMode>(SendMode.TEXT);
   const [bottomInputText, setBottomInputText] = useState('');
+  const [addCRLF, setAddCRLF] = useState(false);
 
   // Transmission State
   const [txProgress, setTxProgress] = useState<number | null>(null);
@@ -387,18 +388,33 @@ const App: React.FC = () => {
   }, [isConnected]);
 
   const handleManualSend = () => {
-    if (!bottomInputText) return;
     let payload: Uint8Array | null = null;
 
     if (bottomInputMode === SendMode.TEXT) {
-      const processedText = bottomInputText.replace(/\\r/g, '\r').replace(/\\n/g, '\n');
+      let processedText = bottomInputText.replace(/\\r/g, '\r').replace(/\\n/g, '\n');
+      if (addCRLF) processedText += '\r\n';
+      
+      if (processedText.length === 0) return;
       payload = new TextEncoder().encode(processedText);
     } else {
-      payload = hexStringToBuffer(bottomInputText);
-      if (!payload) {
-        alert("Invalid Hex format.");
-        return;
+      const raw = hexStringToBuffer(bottomInputText);
+      // If conversion failed
+      if (!raw) {
+          if (bottomInputText.trim().length > 0) alert("Invalid Hex format.");
+          return;
       }
+      
+      // Handle CRLF for Hex: append 0x0D 0x0A
+      if (addCRLF) {
+          const joined = new Uint8Array(raw.length + 2);
+          joined.set(raw);
+          joined.set([0x0D, 0x0A], raw.length);
+          payload = joined;
+      } else {
+          payload = raw;
+      }
+      
+      if (payload.length === 0) return;
     }
 
     if (payload) {
@@ -597,9 +613,9 @@ const App: React.FC = () => {
       {/* Bottom Panel */}
       <div className="bg-gray-900 border-t border-gray-800 p-2">
         <div className="flex items-center gap-4 max-w-full">
-            <div className="flex-1 flex gap-2">
+            <div className="flex-1 flex gap-2 items-center">
                 <select 
-                  className="bg-gray-800 text-gray-300 text-xs border border-gray-700 rounded px-2 focus:ring-1 focus:ring-blue-500 outline-none"
+                  className="bg-gray-800 text-gray-300 text-xs border border-gray-700 rounded px-2 h-8 focus:ring-1 focus:ring-blue-500 outline-none"
                   value={bottomInputMode}
                   onChange={(e) => setBottomInputMode(e.target.value as SendMode)}
                 >
@@ -612,8 +628,19 @@ const App: React.FC = () => {
                   onChange={(e) => setBottomInputText(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleManualSend()}
                   placeholder={bottomInputMode === SendMode.TEXT ? "Send text line (Enter)..." : "AA BB 01 02..."}
-                  className="flex-1 bg-gray-950 text-white text-sm border border-gray-700 rounded px-3 py-1 focus:ring-1 focus:ring-blue-500 outline-none font-mono"
+                  className="flex-1 bg-gray-950 text-white text-sm border border-gray-700 rounded px-3 py-1 h-8 focus:ring-1 focus:ring-blue-500 outline-none font-mono"
                 />
+                
+                <label className="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300 select-none whitespace-nowrap text-xs mx-1">
+                  <input 
+                    type="checkbox" 
+                    checked={addCRLF} 
+                    onChange={(e) => setAddCRLF(e.target.checked)}
+                    className="rounded bg-gray-800 border-gray-600 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>\r\n</span>
+                </label>
+
                 <Button onClick={handleManualSend} disabled={!isConnected} className="h-8 text-xs py-0">
                   Send
                 </Button>
