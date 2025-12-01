@@ -1,10 +1,11 @@
 
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ConfigPanel } from './components/ConfigPanel';
 import { Button } from './components/Button';
 import { TerminalView, TerminalRef } from './components/TerminalView';
 import { SerialPort, DisplayMode, SendMode, ParityType, FlowControlType } from './types';
-import { bufferToHex, hexStringToBuffer, downloadBlob, formatTimestamp, concatUint8Arrays } from './utils';
+import { bufferToHex, hexStringToBuffer, downloadBlob, formatTimestamp, concatUint8Arrays, formatHexDumpLine } from './utils';
 
 // Web Serial API Polyfill for TypeScript
 declare global {
@@ -61,61 +62,92 @@ const App: React.FC = () => {
   const pendingChunks = useRef<HistoryItem[]>([]);
 
   // State tracking for line-based timestamping in TEXT mode
-  // We need to know if the last character printed was a newline to prepend a timestamp
   const lastCharWasNewline = useRef(true);
+
+  // State tracking for Hexdump mode
+  const hexBuffer = useRef<Uint8Array>(new Uint8Array(0));
+  const hexOffset = useRef(0);
+  const isHexPartialPrinted = useRef(false);
 
   // --- Helpers ---
 
-  // NOTE: This function is ONLY used for "Formatted" modes (Hex or Text+Timestamp).
-  // Raw Text mode bypasses this to support full xterm control characters.
-  const formatDataForDisplay = (item: HistoryItem, mode: DisplayMode, withTime: boolean, isNewLineStart: boolean): { text: string, endsWithNewline: boolean } => {
+  // NOTE: This function is ONLY used for "Formatted" Text mode + Timestamp logs.
+  const formatDataForTextLog = (item: HistoryItem, withTime: boolean, isNewLineStart: boolean): { text: string, endsWithNewline: boolean } => {
     const tsString = withTime ? `\x1b[32m${formatTimestamp(item.timestamp)}\x1b[0m ` : '';
     
-    if (mode === DisplayMode.HEX) {
-      // Hex mode: Just prepend timestamp to the block
-      const hex = bufferToHex(item.data);
-      return { 
-        text: `${tsString}${hex} `, 
-        endsWithNewline: false 
-      };
-    } else {
-      // Text mode WITH timestamp: We must decode and inject timestamps.
-      // This might break some complex ANSI sequences split across chunks, but it's the trade-off for per-line timestamps.
-      let textStr = new TextDecoder().decode(item.data);
-      
-      if (withTime) {
-        let formatted = '';
-        if (isNewLineStart) {
-          formatted += tsString;
-        }
-        // Inject timestamp after every newline
-        formatted += textStr.replace(/\n/g, `\n${tsString}`);
-        
-        const endsWithNL = textStr.endsWith('\n');
-        return { text: formatted, endsWithNewline: endsWithNL };
+    // We must decode and inject timestamps.
+    let textStr = new TextDecoder().decode(item.data);
+    
+    if (withTime) {
+      let formatted = '';
+      if (isNewLineStart) {
+        formatted += tsString;
       }
+      // Inject timestamp after every newline
+      formatted += textStr.replace(/\n/g, `\n${tsString}`);
       
-      return { text: textStr, endsWithNewline: textStr.endsWith('\n') };
+      const endsWithNL = textStr.endsWith('\n');
+      return { text: formatted, endsWithNewline: endsWithNL };
     }
+    
+    return { text: textStr, endsWithNewline: textStr.endsWith('\n') };
   };
 
   const writeBatchToTerminal = (items: HistoryItem[], isRepaint = false) => {
     if (!terminalRef.current || items.length === 0) return;
 
-    // FAST PATH: Raw Text Mode (No Timestamp)
-    // Directly pipe binary data to xterm for perfect emulation
+    // --- MODE 1: Raw Text (Direct Pass-through) ---
     if (displayMode === DisplayMode.TEXT && !showTimestamp) {
         const rawBuffers = items.map(i => i.data);
         const merged = concatUint8Arrays(rawBuffers);
         terminalRef.current.write(merged);
-        if (isRepaint) lastCharWasNewline.current = true; // Reset heuristic
+        if (isRepaint) lastCharWasNewline.current = true;
         return;
     }
 
-    // SLOW PATH: Formatted modes (Hex or Text+Timestamp)
+    // --- MODE 2: Hexdump ---
+    if (displayMode === DisplayMode.HEX) {
+        const rawBuffers = items.map(i => i.data);
+        const newData = concatUint8Arrays(rawBuffers);
+        
+        // Combine with any previously partial bytes
+        const totalData = concatUint8Arrays([hexBuffer.current, newData]);
+        
+        let currentOffset = 0;
+        let output = '';
+
+        // If we previously printed a partial line, verify cursor is reset or use CR to overwrite
+        if (isHexPartialPrinted.current) {
+            output += '\r\x1b[K'; // Move to start of line and clear it
+            isHexPartialPrinted.current = false;
+        }
+
+        // Process full 16-byte chunks
+        while (currentOffset + 16 <= totalData.length) {
+            const chunk = totalData.slice(currentOffset, currentOffset + 16);
+            output += formatHexDumpLine(hexOffset.current, chunk) + '\r\n';
+            hexOffset.current += 16;
+            currentOffset += 16;
+        }
+
+        // Store remaining bytes that don't make a full line yet
+        const remaining = totalData.slice(currentOffset);
+        hexBuffer.current = remaining;
+        
+        // Print partial line if any (without newline, so it can be overwritten next time)
+        if (remaining.length > 0) {
+            output += formatHexDumpLine(hexOffset.current, remaining);
+            isHexPartialPrinted.current = true;
+        }
+
+        terminalRef.current.write(output);
+        return;
+    }
+
+    // --- MODE 3: Text with Timestamp ---
     let buffer = '';
     for (const item of items) {
-       const res = formatDataForDisplay(item, displayMode, showTimestamp, lastCharWasNewline.current);
+       const res = formatDataForTextLog(item, showTimestamp, lastCharWasNewline.current);
        lastCharWasNewline.current = res.endsWithNewline;
        buffer += res.text;
     }
@@ -126,7 +158,12 @@ const App: React.FC = () => {
     if (!terminalRef.current) return;
     
     terminalRef.current.reset(); // Fully clear xterm
-    lastCharWasNewline.current = true; // Reset state
+    lastCharWasNewline.current = true; // Reset Text state
+
+    // Reset Hex state
+    hexBuffer.current = new Uint8Array(0);
+    hexOffset.current = 0;
+    isHexPartialPrinted.current = false;
 
     // Process history in chunks to avoid blocking UI
     const CHUNK_SIZE = 2000;
@@ -229,7 +266,12 @@ const App: React.FC = () => {
       setIsConnected(true);
       rxHistory.current = [];
       pendingChunks.current = [];
+      
+      // Reset logic
       lastCharWasNewline.current = true;
+      hexBuffer.current = new Uint8Array(0);
+      hexOffset.current = 0;
+      isHexPartialPrinted.current = false;
 
       // Initial message
       const msg = `\x1b[32m\r\n--- Connected to ${baudRate} baud ---\x1b[0m\r\n`;
@@ -407,10 +449,9 @@ const App: React.FC = () => {
         mimeType = 'application/octet-stream';
     } else {
         // Text Log Save (Uses the formatted text logic)
-        // We use a clean state just for generating the log string
         let tempNewlineState = true;
         for (const item of rxHistory.current) {
-            const res = formatDataForDisplay(item, displayMode, showTimestamp, tempNewlineState);
+            const res = formatDataForTextLog(item, showTimestamp, tempNewlineState);
             tempNewlineState = res.endsWithNewline;
             blobParts.push(res.text);
         }
@@ -427,7 +468,7 @@ const App: React.FC = () => {
       {/* Header & Config */}
       <header className="bg-gray-900 border-b border-gray-800">
           <div className="px-4 py-2 flex items-center justify-between">
-            <h1 className="text-lg font-bold text-white flex items-center gap-2">
+            <h1 className="text-lg font-bold text-white flex items-center gap-2 overflow-hidden">
                 <svg className="w-14 h-14 text-blue-500 -my-3 mr-2" viewBox="0 0 1024 1024" fill="currentColor">
                     <path d="M578.4 309c-5 2-5.4 4-5.4 25.2V354h114.1l-.3-20.1-.3-20.1-3.3-2.9-3.2-2.9-49.8.1c-27.3 0-50.7.4-51.8.9m19.4 17.9c.9.5 1.2 2.8 1 7.7-.3 6.8-.3 6.9-3.3 7.2-1.9.3-3.3-.2-4.2-1.4-1.6-2.2-1.7-11.6-.1-13.2 1.4-1.4 4.7-1.6 6.6-.3m35 .3c.7.7 1.2 3.7 1.2 6.8 0 6-1.1 8-4.5 8s-4.5-2-4.5-8 1.1-8 4.5-8c1.2 0 2.6.5 3.3 1.2m35 0c.7.7 1.2 3.7 1.2 6.8 0 6-1.1 8-4.5 8s-4.5-2-4.5-8 1.1-8 4.5-8c1.2 0 2.6.5 3.3 1.2"/>
                     <path d="M548 336c-1.7 1.7-2 3.3-2 12.5V359l-3.4 1.4c-7 2.9-6.6-1.7-6.6 76.4 0 64.5.1 70.5 1.7 72.9 3 4.5 6.7 5.3 24.6 5.3h16.5l7.8 19 7.9 19h70.2l7.9-19 7.8-19H697c18.9 0 22.2-.9 25.2-7 1.7-3.2 1.8-8.7 1.8-71 0-75.7.3-72.5-7.2-76.5l-3.8-2v-10.3c0-8.9-.3-10.5-2-12.2-2.5-2.5-5.2-2.6-7.3-.2-1.4 1.5-1.7 4-1.7 12.5V359H557v-10.8c0-9.3-.3-11.1-1.8-12.5-2.5-2.2-4.8-2.1-7.2.3m126.4 69.2c1.4 1.9 1.6 6.2 1.6 27 0 23.5-.1 24.9-2 26.8s-3.3 2-44.1 2c-27.1 0-42.7-.4-44-1-1.8-1-1.9-2.4-1.9-27.8 0-19.5.3-27.1 1.2-28s12.1-1.2 44.4-1.2h43.3z"/>
@@ -505,6 +546,10 @@ const App: React.FC = () => {
                   rxHistory.current = [];
                   lastCharWasNewline.current = true;
                   terminalRef.current?.reset();
+                  // Also reset hex state
+                  hexBuffer.current = new Uint8Array(0);
+                  hexOffset.current = 0;
+                  isHexPartialPrinted.current = false;
                 }} className="text-xs py-1 h-8 whitespace-nowrap">
                     Clear Screen
                 </Button>

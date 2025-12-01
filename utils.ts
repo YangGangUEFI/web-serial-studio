@@ -1,4 +1,5 @@
 
+
 export const bufferToHex = (buffer: Uint8Array): string => {
   return Array.from(buffer)
     .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
@@ -35,6 +36,23 @@ export const concatUint8Arrays = (arrays: Uint8Array[]): Uint8Array => {
 export const formatTimestamp = (timestamp: number): string => {
   const date = new Date(timestamp);
   return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}.${date.getMilliseconds().toString().padStart(3, '0')}]`;
+};
+
+export const formatHexDumpLine = (offset: number, data: Uint8Array): string => {
+  const address = offset.toString(16).padStart(8, '0');
+  
+  const hexPart = Array.from(data)
+    .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+    .join(' ');
+  
+  // 3 chars per byte (2 digits + 1 space)
+  const padding = '   '.repeat(16 - data.length); 
+  
+  const asciiPart = Array.from(data)
+    .map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.')
+    .join('');
+    
+  return `${address}  ${hexPart}${padding}  |${asciiPart}|`;
 };
 
 export const downloadBlob = async (content: BlobPart[], filename: string, contentType: string) => {
